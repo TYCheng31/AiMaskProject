@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Mask Detection</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            display: flex;
+        }
+        .video-feed {
+            margin-right: 20px;
+        }
+        .info-section {
+            max-width: 300px;
+        }
+        .card {
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 8px;
+        }
+        h2 {
+            margin-top: 0;
+        }
+        #counts, #coords {
+            white-space: pre-wrap; /* 保留換行 */
+        }
+        #warningMessage {
+            display: none;
+            color: red;
+            border: 2px solid red;
+            padding: 10px;
+            margin-top: 10px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- (1) 即時影像 -->
+        <div class="video-feed">
+            <h2>即時影像</h2>
+            <img src="{{ url_for('video_feed') }}" alt="Video stream">
+        </div>
+
+        <!-- (2) 偵測資訊 + 閾值設定 + 警告區/Line 通知 -->
+        <div class="info-section">
+            <h2>偵測資訊</h2>
+
+            <div class="card">
+                <h3>警告人數</h3>
+                <input type="number" id="noMaskThreshold" value="1" min="0">
+            </div>
+
+            <div class="card">
+                <h3>人數分布</h3>
+                <div id="counts">Loading...</div>
+            </div>
+
+            <div class="card">
+                <h3>未戴口罩位置</h3>
+                <div id="coords">Loading...</div>
+            </div>
+
+            <div id="warningMessage">
+                <h3>警告</h3>
+                <p>未戴口罩人數已超過限制，已發送通知至 Line！</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    let hasAlerted = false;  // 紀錄這次超標後，是否已經發送過通知，避免連續狂發
+
+    async function fetchDetectionData() {
+        try {
+            const response = await fetch("/detection_data");
+            const data = await response.json();
+
+            const counts = data.counts || {};
+            const noMaskCoords = data.no_mask_coords || [];
+
+            // (A) 顯示人數分布
+            let countsText = "";
+            if (Object.keys(counts).length === 0) {
+                countsText = "目前無偵測結果";
+            } else {
+                for (const className in counts) {
+                    countsText += `${className}: ${counts[className]}\n`;
+                }
+            }
+            document.getElementById("counts").textContent = countsText;
+
+            // (B) 顯示未戴口罩位置
+            let coordsText = "";
+            if (noMaskCoords.length === 0) {
+                coordsText = "目前無未戴口罩";
+            } else {
+                noMaskCoords.forEach((coord, i) => {
+                    coordsText += `${i + 1}: (${coord[0]}, ${coord[1]})\n`;
+                });
+            }
+            document.getElementById("coords").textContent = coordsText;
+
+            // (C) 讀取用戶設定的閾值
+            const thresholdInput = document.getElementById("noMaskThreshold");
+            const threshold = parseInt(thresholdInput.value) || 0;
+
+            // (D) 判斷是否超標，並控制警告訊息
+            const warningMessage = document.getElementById("warningMessage");
+            if (noMaskCoords.length > threshold) {
+                warningMessage.style.display = "block";
+
+                // 若尚未發送過通知，則向後端發送請求
+                if (!hasAlerted) {
+                    hasAlerted = true; // 設為 true，避免重複發送
+
+                    // 建立要送到 Line 的訊息
+                    const lineMsg = `【警告】現場未戴口罩人數：${noMaskCoords.length}，已超過閾值(${threshold})！`;
+
+                    // 呼叫 /line_notify
+                    await fetch("/line_notify", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify({ message: lineMsg })
+                    });
+                }
+            } else {
+                warningMessage.style.display = "none";
+                hasAlerted = false;  // 若恢復正常，重新允許發送下一次的警告
+            }
+
+        } catch (err) {
+            console.error("Error fetching detection data:", err);
+        }
+    }
+
+    // 1 秒抓一次
+    setInterval(fetchDetectionData, 1000);
+
+    // 頁面載入完成後先抓一次
+    window.onload = fetchDetectionData;
+    </script>
+</body>
+</html>
