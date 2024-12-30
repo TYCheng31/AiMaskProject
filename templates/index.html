@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
+    <meta charset="UTF-8" />
     <title>Mask Detection</title>
     <style>
         body {
@@ -9,12 +9,16 @@
         }
         .container {
             display: flex;
+            flex-wrap: wrap; /* 允許換行，以適應較小的螢幕 */
         }
         .video-feed {
+            flex: 1 1 50%; /* 左側佔一半 */
             margin-right: 20px;
+            min-width: 300px;
         }
         .info-section {
-            max-width: 300px;
+            flex: 1 1 45%; /* 右側佔約一半 */
+            max-width: 800px; /* 調整寬度以容納三張圖表 */
         }
         .card {
             border: 1px solid #ccc;
@@ -25,9 +29,10 @@
         h2 {
             margin-top: 0;
         }
-        #counts, #coords {
+        #counts, #coords, #summary {
             white-space: pre-wrap; /* 保留換行 */
         }
+        /* 警告區塊 */
         #warningMessage {
             display: none;
             color: red;
@@ -36,44 +41,95 @@
             margin-top: 10px;
             border-radius: 4px;
         }
+        /* 表格樣式 (自行調整) */
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-top: 10px;
+        }
+        table, th, td {
+            border: 1px solid #aaa;
+        }
+        th, td {
+            padding: 8px;
+            text-align: center;
+        }
+        th {
+            background-color: #eee;
+        }
     </style>
+    <!-- 引入 Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
+    <!-- 主容器：左邊顯示即時影像、右邊顯示偵測資訊 -->
     <div class="container">
-        <!-- (1) 即時影像 -->
+        <!-- 左側：即時影像 -->
         <div class="video-feed">
             <h2>即時影像</h2>
-            <img src="{{ url_for('video_feed') }}" alt="Video stream">
+            <!-- 後端提供的串流端點 /video_feed -->
+            <img src="{{ url_for('video_feed') }}" alt="Video stream" />
         </div>
 
-        <!-- (2) 偵測資訊 + 閾值設定 + 警告區/Line 通知 -->
+        <!-- 右側：偵測資訊與控制面板 -->
         <div class="info-section">
             <h2>偵測資訊</h2>
 
+            <!-- (1) 輸入框：未戴口罩「百分比」閾值 -->
             <div class="card">
-                <h3>警告人數</h3>
-                <input type="number" id="noMaskThreshold" value="1" min="0">
+                <h3>警告百分比%</h3>
+                <input type="number" id="noMaskThreshold" value="30" min="0" />
             </div>
 
+            <!-- (2) 人數分布 (各類別) -->
             <div class="card">
                 <h3>人數分布</h3>
                 <div id="counts">Loading...</div>
             </div>
 
+            <!-- (3) 統計摘要：總人數、未戴口罩人數、百分比 -->
+            <div class="card">
+                <h3>統計摘要</h3>
+                <div id="summary">Loading...</div>
+            </div>
+
+            <!-- (4) 未戴口罩座標 -->
             <div class="card">
                 <h3>未戴口罩位置</h3>
                 <div id="coords">Loading...</div>
             </div>
 
+            <!-- (5) 警告訊息區塊 (若超標會顯示) -->
             <div id="warningMessage">
                 <h3>警告</h3>
-                <p>未戴口罩人數已超過限制，已發送通知至 Line！</p>
+                <p>未戴口罩人數已超過限制！</p>
+            </div>
+
+            <!-- (6) 查看資料庫最近 20 筆紀錄並顯示為長條圖 -->
+            <div class="card">
+                <h3>查看最近 20 筆資料</h3>
+                <button id="showLastTwentyBtn">顯示長條圖</button>
+                <!-- ★★ 新增：傳送圖表到 LINE Notify 按鈕 ★★ -->
+                <button id="sendChartsBtn" style="margin-left: 10px;">傳送分析報告</button>
+
+                <div style="display: flex; flex-direction: column; gap: 20px; margin-top: 20px;">
+                    <canvas id="latestChart" width="400" height="200" style="display:none;"></canvas>
+                    <canvas id="maskPercentChart" width="400" height="200" style="display:none;"></canvas>
+                    <canvas id="noMaskPercentChart" width="400" height="200" style="display:none;"></canvas>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
-    let hasAlerted = false;  // 紀錄這次超標後，是否已經發送過通知，避免連續狂發
+    // 避免在超標期間「狂發」訊息，使用此旗標控制
+    let hasAlerted = false;
+
+    // 每 1 秒 (1000ms) 撈一次後端資料
+    setInterval(fetchDetectionData, 1000);
+
+    // 頁面載入後先撈一次
+    window.onload = fetchDetectionData;
 
     async function fetchDetectionData() {
         try {
@@ -83,7 +139,7 @@
             const counts = data.counts || {};
             const noMaskCoords = data.no_mask_coords || [];
 
-            // (A) 顯示人數分布
+            // (1) 顯示人數分布
             let countsText = "";
             if (Object.keys(counts).length === 0) {
                 countsText = "目前無偵測結果";
@@ -94,7 +150,25 @@
             }
             document.getElementById("counts").textContent = countsText;
 
-            // (B) 顯示未戴口罩位置
+            // (2) 計算總人數、未戴口罩人數、百分比
+            const totalPeople = Object.values(counts).reduce((acc, val) => acc + val, 0);
+            const noMaskCount = counts["No_Mask"] || 0;
+            const noMaskPercent = (totalPeople > 0) 
+                ? ((noMaskCount / totalPeople) * 100).toFixed(2) 
+                : 0;
+            const maskPercent = (totalPeople > 0) 
+                ? (100 - parseFloat(noMaskPercent)).toFixed(2) 
+                : 0;
+
+            // (3) 顯示統計摘要
+            const summaryText = 
+                `總人數: ${totalPeople}\n` +
+                `未配戴口罩: ${noMaskCount}\n` +
+                `未戴口罩百分比: ${noMaskPercent}%\n` +
+                `配戴口罩百分比: ${maskPercent}%`;
+            document.getElementById("summary").textContent = summaryText;
+
+            // (4) 顯示未戴口罩座標
             let coordsText = "";
             if (noMaskCoords.length === 0) {
                 coordsText = "目前無未戴口罩";
@@ -105,23 +179,14 @@
             }
             document.getElementById("coords").textContent = coordsText;
 
-            // (C) 讀取用戶設定的閾值
+            // (5) 閾值檢查
             const thresholdInput = document.getElementById("noMaskThreshold");
-            const threshold = parseInt(thresholdInput.value) || 0;
-
-            // (D) 判斷是否超標，並控制警告訊息
-            const warningMessage = document.getElementById("warningMessage");
-            if (noMaskCoords.length > threshold) {
-                warningMessage.style.display = "block";
-
-                // 若尚未發送過通知，則向後端發送請求
+            const threshold = parseFloat(thresholdInput.value) || 0;
+            if (noMaskPercent > threshold) {
+                document.getElementById("warningMessage").style.display = "block";
                 if (!hasAlerted) {
-                    hasAlerted = true; // 設為 true，避免重複發送
-
-                    // 建立要送到 Line 的訊息
-                    const lineMsg = `【警告】現場未戴口罩人數：${noMaskCoords.length}，已超過閾值(${threshold})！`;
-
-                    // 呼叫 /line_notify
+                    hasAlerted = true;
+                    const lineMsg = `【警告】未戴口罩比例已達 ${noMaskPercent}% (閾值: ${threshold}%)，請注意！`;
                     await fetch("/line_notify", {
                         method: "POST",
                         headers: {
@@ -131,8 +196,8 @@
                     });
                 }
             } else {
-                warningMessage.style.display = "none";
-                hasAlerted = false;  // 若恢復正常，重新允許發送下一次的警告
+                document.getElementById("warningMessage").style.display = "none";
+                hasAlerted = false;
             }
 
         } catch (err) {
@@ -140,11 +205,214 @@
         }
     }
 
-    // 1 秒抓一次
-    setInterval(fetchDetectionData, 1000);
+    // === 顯示資料庫最新 20 筆紀錄為長條圖 ===
+    document.getElementById('showLastTwentyBtn').addEventListener('click', async () => {
+        try {
+            const res = await fetch('/latest_records');
+            const records = await res.json();
 
-    // 頁面載入完成後先抓一次
-    window.onload = fetchDetectionData;
+            if (!Array.isArray(records) || records.length === 0) {
+                alert("目前無資料。");
+                return;
+            }
+
+            // 取得時間、總人數、配戴口罩百分比和未戴口罩百分比
+            const labels = records.map(record => record.timestamp).reverse();
+            const totalPeopleData = records.map(record => record.total_people).reverse();
+            const maskPercentData = records.map(record => record.mask_percent).reverse();
+            const noMaskPercentData = records.map(record => record.no_mask_percent).reverse();
+
+            // 顯示 canvas (並隱藏表格或其他元素)
+            const totalChartCanvas = document.getElementById('latestChart');
+            const maskPercentChartCanvas = document.getElementById('maskPercentChart');
+            const noMaskPercentChartCanvas = document.getElementById('noMaskPercentChart');
+            totalChartCanvas.style.display = 'block';
+            maskPercentChartCanvas.style.display = 'block';
+            noMaskPercentChartCanvas.style.display = 'block';
+
+            // 如果已經有圖表，先銷毀
+            if (window.latestChartInstance) {
+                window.latestChartInstance.destroy();
+            }
+            if (window.maskPercentChartInstance) {
+                window.maskPercentChartInstance.destroy();
+            }
+            if (window.noMaskPercentChartInstance) {
+                window.noMaskPercentChartInstance.destroy();
+            }
+
+            // 總人數長條圖
+            window.latestChartInstance = new Chart(totalChartCanvas.getContext('2d'), {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: '總人數',
+                        data: totalPeopleData,
+                        backgroundColor: 'rgba(54, 162, 235, 0.6)',
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: '最近 20 筆紀錄 - 總人數'
+                        }
+                    },
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: '時間'
+                            }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: '總人數'
+                            },
+                            ticks: {
+                                precision: 0
+                            }
+                        }
+                    }
+                }
+            });
+
+            // 配戴口罩百分比長條圖
+            window.maskPercentChartInstance = new Chart(maskPercentChartCanvas.getContext('2d'), {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: '配戴口罩百分比 (%)',
+                        data: maskPercentData,
+                        backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                        borderColor: 'rgba(75, 192, 192, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: '最近 20 筆紀錄 - 配戴口罩百分比'
+                        }
+                    },
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: '時間'
+                            }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            title: {
+                                display: true,
+                                text: '配戴口罩百分比 (%)'
+                            },
+                            ticks: {
+                                callback: function(value) {
+                                    return value + "%";
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            // 未戴口罩百分比長條圖
+            window.noMaskPercentChartInstance = new Chart(noMaskPercentChartCanvas.getContext('2d'), {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: '未戴口罩百分比 (%)',
+                        data: noMaskPercentData,
+                        backgroundColor: 'rgba(255, 99, 132, 0.6)',
+                        borderColor: 'rgba(255, 99, 132, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: '最近 20 筆紀錄 - 未戴口罩百分比'
+                        }
+                    },
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: '時間'
+                            }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            title: {
+                                display: true,
+                                text: '未戴口罩百分比 (%)'
+                            },
+                            ticks: {
+                                callback: function(value) {
+                                    return value + "%";
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+        } catch (error) {
+            console.error("Error fetching latest records:", error);
+            alert("發生錯誤，無法取得資料。");
+        }
+    });
+
+    // === ★★ 新增：點擊「傳送圖表到 LINE Notify」按鈕 ★★
+    document.getElementById('sendChartsBtn').addEventListener('click', async () => {
+        try {
+            // 1) 取得三個 canvas
+            const canvas1 = document.getElementById('latestChart');
+            const canvas2 = document.getElementById('maskPercentChart');
+            const canvas3 = document.getElementById('noMaskPercentChart');
+
+            // 2) 轉成 Base64
+            const chart1Base64 = canvas1.toDataURL('image/png');
+            const chart2Base64 = canvas2.toDataURL('image/png');
+            const chart3Base64 = canvas3.toDataURL('image/png');
+
+            // 3) 以 JSON 格式 POST 給後端
+            const response = await fetch('/send_charts_to_line', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    chart1: chart1Base64,
+                    chart2: chart2Base64,
+                    chart3: chart3Base64
+                })
+            });
+
+            const result = await response.text();
+            alert(result);
+
+        } catch (error) {
+            console.error('Error sending charts to LINE:', error);
+            alert('傳送圖表至 LINE Notify 時發生錯誤。');
+        }
+    });
     </script>
 </body>
 </html>
