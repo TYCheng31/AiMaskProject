@@ -25,22 +25,29 @@ LINE_NOTIFY_TOKEN = "L4r3y6YeL5aV2q6svJJdvk1YAcm1YxViSAQC61lNPeG"
 LINE_NOTIFY_API = "https://notify-api.line.me/api/notify"
 
 # ==== (C) YOLO 模型 & 攝影機設定 ====
-model = YOLO(r"E:\AIMaskProject\best.pt")  # 請改為實際模型路徑
-cap = cv2.VideoCapture(0)                  # 0 = 電腦內建攝影機
+model = YOLO("D:\\AiMaskProject\\best.pt")  # 請改為實際模型路徑
+
+# 修改攝影機索引為 1，假設外接攝影機的索引為 1
+cap = cv2.VideoCapture(0)                  # 將 0 改為外接攝影機的索引，例如 1
 
 # ==== (D) 全域變數：用於前端顯示 ====
 g_counts = {}            # 用於儲存各類別人數 (e.g. {"Mask": x, "No_Mask": y})
 g_no_mask_coords = []    # 用於儲存未戴口罩座標
+g_fps = 0                # 用於儲存即時 FPS
 
 def gen_frames():
     """
     每當前端請求 /video_feed 時，就會持續執行此函式，
     逐幀讀取影像並透過 yield 傳回串流。
     """
-    global g_counts, g_no_mask_coords
+    global g_counts, g_no_mask_coords, g_fps
 
     # 紀錄上次寫入資料庫的時間（秒數）
     last_saved_time = 0
+
+    # 初始化 FPS 計算
+    frame_count = 0
+    start_time = time.time()
 
     while True:
         success, frame = cap.read()
@@ -100,6 +107,14 @@ def gen_frames():
             # 更新最後寫入時間
             last_saved_time = now
 
+        # ============ (3) 計算 FPS ============
+        frame_count += 1
+        elapsed_time = now - start_time
+        if elapsed_time >= 1.0:
+            g_fps = frame_count / elapsed_time
+            frame_count = 0
+            start_time = now
+
         # 影像轉為串流回應給前端
         ret, buffer = cv2.imencode('.jpg', annotated_frame)
         frame_jpg = buffer.tobytes()
@@ -130,7 +145,8 @@ def detection_data():
     """
     data = {
         "counts": g_counts,
-        "no_mask_coords": g_no_mask_coords
+        "no_mask_coords": g_no_mask_coords,
+        "fps": g_fps  # 新增 FPS
     }
     return jsonify(data)
 
@@ -209,59 +225,42 @@ def latest_records():
 
     return jsonify(result)
 
-# ==== (G) ★ 新增：接收三張圖表 Base64、合併並傳給 LINE Notify ====
+# ==== (G) ★ 新增：接收合併後的圖表 Base64、傳給 LINE Notify ====
 @app.route('/send_charts_to_line', methods=['POST'])
 def send_charts_to_line():
     """
-    接收三張圖表的 Base64 字串，合併後上傳到 Line Notify
+    接收合併後的圖表的 Base64 字串，並上傳到 Line Notify
     """
     data = request.get_json() or {}
-    chart1_base64 = data.get('chart1', '')
-    chart2_base64 = data.get('chart2', '')
-    chart3_base64 = data.get('chart3', '')
+    chart_base64 = data.get('chart', '')
 
-    if not chart1_base64 or not chart2_base64 or not chart3_base64:
-        return "未接收到完整的圖表資料。", 400
+    if not chart_base64:
+        return "未接收到圖表資料。", 400
 
     try:
         # 1) 去除 data:image/png;base64, 的前綴
-        chart1_base64 = chart1_base64.split(',')[1]
-        chart2_base64 = chart2_base64.split(',')[1]
-        chart3_base64 = chart3_base64.split(',')[1]
+        chart_base64 = chart_base64.split(',')[1]
 
         # 2) Base64 解碼成二進位資料
-        chart1_data = base64.b64decode(chart1_base64)
-        chart2_data = base64.b64decode(chart2_base64)
-        chart3_data = base64.b64decode(chart3_base64)
+        chart_data = base64.b64decode(chart_base64)
 
-        # 3) 使用 PIL 開啟三張圖片 (轉為 RGBA 確保格式一致)
-        img1 = Image.open(io.BytesIO(chart1_data)).convert('RGBA')
-        img2 = Image.open(io.BytesIO(chart2_data)).convert('RGBA')
-        img3 = Image.open(io.BytesIO(chart3_data)).convert('RGBA')
+        # 3) 使用 PIL 開啟圖片 (轉為 RGBA 確保格式一致)
+        img = Image.open(io.BytesIO(chart_data)).convert('RGBA')
 
-        # 4) 合併圖片 (水平拼貼示範)
-        total_width = img1.width + img2.width + img3.width
-        max_height = max(img1.height, img2.height, img3.height)
-        combined_img = Image.new('RGBA', (total_width, max_height), (255, 255, 255, 0))
-
-        combined_img.paste(img1, (0, 0))
-        combined_img.paste(img2, (img1.width, 0))
-        combined_img.paste(img3, (img1.width + img2.width, 0))
-
-        # 5) 轉成 BytesIO 以供上傳
+        # 4) 轉成 BytesIO 以供上傳
         img_bytes = io.BytesIO()
-        combined_img.save(img_bytes, format='PNG')
+        img.save(img_bytes, format='PNG')
         img_bytes.seek(0)
 
-        # 6) 呼叫 Line Notify API，上傳圖片 (multipart/form-data)
+        # 5) 呼叫 Line Notify API，上傳圖片 (multipart/form-data)
         headers = {
             "Authorization": f"Bearer {LINE_NOTIFY_TOKEN}",
         }
         files = {
-            "imageFile": ("charts.png", img_bytes, "image/png")
+            "imageFile": ("chart.png", img_bytes, "image/png")
         }
         payload = {
-            "message": "這是三張圖表的合併長條圖"
+            "message": "分析報告"
         }
         r = requests.post(LINE_NOTIFY_API, headers=headers, files=files, data=payload)
 
@@ -272,8 +271,7 @@ def send_charts_to_line():
 
     except Exception as e:
         print("send_charts_to_line error:", e)
-        return "後端處理合併圖片時發生錯誤。", 500
-
+        return "後端處理圖表時發生錯誤。", 500
 
 # ==== (H) 主程式入口 ====
 if __name__ == '__main__':
