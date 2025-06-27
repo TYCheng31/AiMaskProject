@@ -1,4 +1,5 @@
 # AiMaskProject
+
 ## 專題動機
 * 偵測人員是否正確配戴口罩
   * 至今還是有些人戴口罩會把鼻子露出來或是佩戴在下巴
@@ -51,4 +52,5 @@
 *超出閾值  
 <img src="https://github.com/user-attachments/assets/aef14310-7e80-4387-9c0f-1ead891b8cfe" alt="image" width="800" />
 
-
+## 測試影片  
+https://github.com/user-attachments/assets/626ab785-7faa-4ada-91cf-2c918ab06595
